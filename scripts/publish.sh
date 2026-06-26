@@ -110,34 +110,45 @@ function buildpack::publish() {
 
   util::print::title "Publishing composite buildpack..."
 
-  util::print::info "Extracting archive..."
-  tmp_dir=$(mktemp -d -p $ROOT_DIR)
-  tar -xvf $archive_path -C $tmp_dir
-
   util::print::info "Publishing buildpack to ${image_ref}"
 
-  current_dir=$(pwd)
-  cd $tmp_dir
+  # Composite release artifacts contain package.toml; component buildpacks are published from buildpack.tgz directly.
+  if tar -tf "${archive_path}" | grep -q "^package.toml$"; then
+    util::print::info "Extracting composite release artifact..."
+    tmp_dir=$(mktemp -d -p "$ROOT_DIR")
+    tar -xvf "$archive_path" -C "$tmp_dir"
 
-  # If package.toml has no targets we must specify one on the command line, otherwise pack will complain.
-  # This is here for backward compatibility but eventually all package.toml files should have targets defined.
-  targets=""
-  if cat package.toml | yj -tj | jq -r .targets | grep -q null; then
-    # Use the local architecture to support running locally and in CI, which will be linux/amd64 by default.
-    arch=$(util::tools::arch)
-    targets="--target linux/${arch}"
-    echo "package.toml has no targets so ${targets} will be used"
+    current_dir=$(pwd)
+    cd "$tmp_dir"
+
+    # If package.toml has no targets we must specify one on the command line, otherwise pack will complain.
+    # This is here for backward compatibility but eventually all package.toml files should have targets defined.
+    targets=""
+    if cat package.toml | yj -tj | jq -r .targets | grep -q null; then
+      # Use the local architecture to support running locally and in CI, which will be linux/amd64 by default.
+      arch=$(util::tools::arch)
+      targets="--target linux/${arch}"
+      echo "package.toml has no targets so ${targets} will be used"
+    fi
+
+    pack \
+      buildpack package "${image_ref}" \
+      --config package.toml \
+      --format image \
+      --publish \
+      ${targets}
+
+    cd "$current_dir"
+    rm -rf "$tmp_dir"
+  else
+    util::print::info "No package.toml found in archive; publishing as a component buildpack archive"
+
+    pack \
+      buildpack package "${image_ref}" \
+      --path "${archive_path}" \
+      --format image \
+      --publish
   fi
-
-  pack \
-    buildpack package "${image_ref}" \
-    --config package.toml \
-    --format image \
-    --publish \
-    ${targets}
-
-  cd $current_dir
-  rm -rf $tmp_dir
 }
 
 main "${@:-}"

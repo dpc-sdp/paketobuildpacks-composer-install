@@ -97,10 +97,10 @@ jobs:
 
       - name: Validate version
         run: |
-          buidpackTomlVersion=$(tar -xzf build/buildpack.tgz --to-stdout buildpack.toml | yj -tj | jq -r .buildpack.version)
+          buildpackTomlVersion=$(tar -xzf build/buildpack.tgz --to-stdout buildpack.toml | yj -tj | jq -r .buildpack.version)
           githubReleaseVersion="${{ steps.event.outputs.tag_full }}"
-          if [[ "$buidpackTomlVersion" != "$githubReleaseVersion" ]]; then
-            echo "Version in buildpack.toml ($buidpackTomlVersion) and resolved workflow version ($githubReleaseVersion) are not identical"
+          if [[ "$buildpackTomlVersion" != "$githubReleaseVersion" ]]; then
+            echo "Version in buildpack.toml ($buildpackTomlVersion) and resolved workflow version ($githubReleaseVersion) are not identical"
             exit 1
           fi
 
