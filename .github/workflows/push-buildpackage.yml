@@ -163,7 +163,7 @@ jobs:
         id: push_ghcr
         run: |
           ./scripts/publish.sh \
-            --archive-path build/buildpack-release-artifact.tgz \
+            --archive-path build/buildpack.tgz \
             --image-ref "ghcr.io/${{ github.repository }}:${{ steps.event.outputs.tag_full }}"
 
           pushed_image_index_digest=$(crane digest "ghcr.io/${{ github.repository }}:${{ steps.event.outputs.tag_full }}" | xargs)
