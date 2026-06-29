@@ -78,7 +78,7 @@ jobs:
           ./scripts/package.sh --version "${{ steps.event.outputs.tag_full }}" --output build/buildpackage.cnb
 
       - name: Parse Configs
-        id: parse_configs
+        id: parse_configs_ecr
         run: |
           registries_filename="${{ env.REGISTRIES_FILENAME }}"
 
@@ -94,7 +94,7 @@ jobs:
 
       - name: Parse Configs - ghcr.io
         if: ${{ inputs.registry == 'ghcr.io' }}
-        id: parse_configs
+        id: parse_configs_ghcr
         run: |
           registries_filename="${{ env.REGISTRIES_FILENAME }}"
 
@@ -134,7 +134,7 @@ jobs:
 
       - name: Push to ECR
         if: ${{ steps.parse_configs.outputs.push_to_ecr == 'true' }}
-        id: push
+        id: push_ecr
         run: |
           ./scripts/publish.sh \
             --archive-path build/buildpack.tgz \
@@ -159,7 +159,7 @@ jobs:
 
       - name: Push to ghcr.io
         if: ${{ steps.parse_configs.outputs.push_to_ghcr == 'true' }}
-        id: push
+        id: push_ghcr
         run: |
           ./scripts/publish.sh \
             --archive-path build/buildpack-release-artifact.tgz \
