@@ -2,10 +2,10 @@ api = "0.7"
 
 [buildpack]
   description = "A buildpack for running 'composer install' to vendor in PHP dependencies"
-  homepage = "https://github.com/paketo-buildpacks/composer-install"
-  id = "paketo-buildpacks/composer-install"
+  homepage = "https://github.com/dpc-sdp/paketobuildpacks-composer-install"
+  id = "dpc-sdp/paketobuildpacks-composer-install"
   keywords = ["php", "composer"]
-  name = "Paketo Buildpack for Composer Install"
+  name = "Forked Paketo Buildpack for Composer Install"
   sbom-formats = ["application/vnd.cyclonedx+json", "application/spdx+json", "application/vnd.syft+json"]
 
   [[buildpack.licenses]]
