@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -237,6 +238,13 @@ func runComposerRequireIfRequired(
 	if len(packages) == 0 {
 		return nil
 	}
+	packageNames := packageNamesFromSpecs(packages)
+
+	composerLockPath := filepath.Join(filepath.Dir(composerJsonPath), DefaultComposerLockPath)
+	lockSnapshotBefore, lockExisted, err := composerLockSnapshot(composerLockPath)
+	if err != nil {
+		return err
+	}
 
 	if removeDevArgs, err := determineComposerRemoveDevArgs(composerJsonPath, packages); err != nil {
 		return err
@@ -263,7 +271,7 @@ func runComposerRequireIfRequired(
 		}
 	}
 
-	args := append([]string{"require", "--no-progress"}, packages...)
+	args := append([]string{"require", "--no-progress", "--no-update"}, packages...)
 	logger.Process("Running 'composer %s'", strings.Join(args, " "))
 
 	execution := pexec.Execution{
@@ -281,7 +289,117 @@ func runComposerRequireIfRequired(
 		Stderr: logger.ActionWriter,
 	}
 
-	return composerInstallExec.Execute(execution)
+	if err := composerInstallExec.Execute(execution); err != nil {
+		return err
+	}
+
+	updateArgs := append([]string{"update", "--no-progress", "--no-dev", "--with-dependencies"}, packageNames...)
+	logger.Process("Running 'composer %s'", strings.Join(updateArgs, " "))
+
+	updateExecution := pexec.Execution{
+		Args: updateArgs,
+		Dir:  context.WorkingDir,
+		Env: append(os.Environ(),
+			"COMPOSER_NO_INTERACTION=1", // https://getcomposer.org/doc/03-cli.md#composer-no-interaction
+			fmt.Sprintf("COMPOSER=%s", composerJsonPath),
+			fmt.Sprintf("COMPOSER_HOME=%s", composerHomePath),
+			fmt.Sprintf("COMPOSER_VENDOR_DIR=%s", workspaceVendorDir),
+			fmt.Sprintf("PHPRC=%s", composerPhpIniPath),
+			fmt.Sprintf("PATH=%s", path),
+		),
+		Stdout: logger.ActionWriter,
+		Stderr: logger.ActionWriter,
+	}
+
+	if err := composerInstallExec.Execute(updateExecution); err != nil {
+		return err
+	}
+
+	if !lockExisted {
+		return nil
+	}
+
+	lockSnapshotAfter, _, err := composerLockSnapshot(composerLockPath)
+	if err != nil {
+		return err
+	}
+
+	unexpected := unexpectedLockChanges(lockSnapshotBefore, lockSnapshotAfter, packageNames)
+	if len(unexpected) > 0 {
+		return fmt.Errorf("BP_COMPOSER_INSTALL_REQUIRE updated unexpected packages in composer.lock: %s", strings.Join(unexpected, ", "))
+	}
+
+	return nil
+}
+
+func packageNamesFromSpecs(specs []string) []string {
+	var names []string
+	for _, spec := range specs {
+		parts := strings.SplitN(spec, ":", 2)
+		names = append(names, parts[0])
+	}
+
+	return names
+}
+
+func composerLockSnapshot(lockPath string) (map[string]string, bool, error) {
+	if exists, err := fs.Exists(lockPath); err != nil {
+		return nil, false, err
+	} else if !exists {
+		return map[string]string{}, false, nil
+	}
+
+	file, err := os.Open(lockPath)
+	if err != nil {
+		return nil, true, err
+	}
+	defer file.Close()
+
+	var lock struct {
+		Packages []struct {
+			Name    string
+			Version string
+		} `json:"packages"`
+	}
+
+	if err := json.NewDecoder(file).Decode(&lock); err != nil {
+		return nil, true, err
+	}
+
+	snapshot := map[string]string{}
+	for _, pkg := range lock.Packages {
+		snapshot[pkg.Name] = pkg.Version
+	}
+
+	return snapshot, true, nil
+}
+
+func unexpectedLockChanges(before, after map[string]string, allowedPackages []string) []string {
+	allowed := map[string]struct{}{}
+	for _, name := range allowedPackages {
+		allowed[name] = struct{}{}
+	}
+
+	allNames := map[string]struct{}{}
+	for name := range before {
+		allNames[name] = struct{}{}
+	}
+	for name := range after {
+		allNames[name] = struct{}{}
+	}
+
+	var unexpected []string
+	for name := range allNames {
+		if before[name] == after[name] {
+			continue
+		}
+		if _, ok := allowed[name]; !ok {
+			unexpected = append(unexpected, name)
+		}
+	}
+
+	sort.Strings(unexpected)
+	return unexpected
 }
 
 func determineComposerRemoveDevArgs(composerJsonPath string, packageSpecs []string) ([]string, error) {
@@ -371,6 +489,10 @@ func runComposerInstall(
 		// the layer is always set to cache = true because we need it during subsequent builds to copy vendor into /workspace
 		composerPackagesLayer.Cache = true
 
+		// Expose vendor/bin in the launch PATH so executables installed by Composer
+		// (e.g. drush, phpunit) are available when the container starts.
+		composerPackagesLayer.LaunchEnv.Prepend("PATH", filepath.Join(composerPackagesLayer.Path, "vendor", "bin"), string(os.PathListSeparator))
+
 		logger.Debug.Subprocess("Setting cached layer types: launch=[%t], build=[%t], cache=[%t]",
 			composerPackagesLayer.Launch,
 			composerPackagesLayer.Build,
@@ -413,6 +535,10 @@ func runComposerInstall(
 	composerPackagesLayer.Launch, composerPackagesLayer.Build = launch, build
 	// the layer is always set to cache = true because we need it during subsequent builds to copy vendor into /workspace
 	composerPackagesLayer.Cache = true
+
+	// Expose vendor/bin in the launch PATH so executables installed by Composer
+	// (e.g. drush, phpunit) are available when the container starts.
+	composerPackagesLayer.LaunchEnv.Prepend("PATH", filepath.Join(composerPackagesLayer.Path, "vendor", "bin"), string(os.PathListSeparator))
 
 	logger.Debug.Subprocess("Setting layer types: launch=[%t], build=[%t], cache=[%t]",
 		composerPackagesLayer.Launch,

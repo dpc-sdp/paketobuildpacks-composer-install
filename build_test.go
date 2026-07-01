@@ -33,6 +33,7 @@ func testBuild(t *testing.T, context spec.G, it spec.S) {
 		composerConfigExecution                          pexec.Execution
 		composerInstallExecution                         pexec.Execution
 		composerRequireExecution                         pexec.Execution
+		composerUpdateExecution                          pexec.Execution
 		composerRemoveExecution                          pexec.Execution
 		composerGlobalExecution                          pexec.Execution
 		composerCheckAndEnablePlatformReqsExecExecution  pexec.Execution
@@ -81,6 +82,10 @@ func testBuild(t *testing.T, context spec.G, it spec.S) {
 				Expect(fmt.Fprint(temp.Stdout, "stdout from composer require\n")).To(Equal(29))
 				Expect(fmt.Fprint(temp.Stderr, "stderr from composer require\n")).To(Equal(29))
 				composerRequireExecution = temp
+			case "update":
+				Expect(fmt.Fprint(temp.Stdout, "stdout from composer update\n")).To(Equal(28))
+				Expect(fmt.Fprint(temp.Stderr, "stderr from composer update\n")).To(Equal(28))
+				composerUpdateExecution = temp
 			case "install":
 				Expect(os.MkdirAll(filepath.Join(workingDir, "vendor", "local-package-name"), os.ModeDir|os.ModePerm)).To(Succeed())
 				Expect(fmt.Fprint(temp.Stdout, "stdout from composer install\n")).To(Equal(29))
@@ -189,7 +194,10 @@ php       8.1.4    success
 			Expect(packagesLayer.Cache).To(BeTrue())
 
 			Expect(packagesLayer.BuildEnv).To(BeEmpty())
-			Expect(packagesLayer.LaunchEnv).To(BeEmpty())
+			Expect(packagesLayer.LaunchEnv).To(Equal(packit.Environment{
+				"PATH.prepend": filepath.Join(layersDir, composer.ComposerPackagesLayerName, "vendor", "bin"),
+				"PATH.delim":   string(os.PathListSeparator),
+			}))
 			Expect(packagesLayer.ProcessLaunchEnv).To(BeEmpty())
 			Expect(packagesLayer.Metadata["composer-lock-sha"]).To(Equal("default-checksum"))
 			Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal(""))
@@ -400,11 +408,13 @@ extension = openssl.so`))
 			})
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(composerRequireExecution.Args).To(Equal([]string{"require", "--no-progress", "vlucas/phpdotenv"}))
+			Expect(composerRequireExecution.Args).To(Equal([]string{"require", "--no-progress", "--no-update", "vlucas/phpdotenv"}))
 			Expect(composerRequireExecution.Dir).To(Equal(filepath.Join(workingDir)))
 			Expect(composerRequireExecution.Stdout).ToNot(BeNil())
 			Expect(composerRequireExecution.Stderr).ToNot(BeNil())
 			Expect(len(composerRequireExecution.Env)).To(Equal(len(os.Environ()) + 6))
+			Expect(composerUpdateExecution.Args).To(Equal([]string{"update", "--no-progress", "--no-dev", "--with-dependencies", "vlucas/phpdotenv"}))
+			Expect(composerUpdateExecution.Dir).To(Equal(filepath.Join(workingDir)))
 
 			Expect(composerRequireExecution.Env).To(ContainElements(
 				"COMPOSER_NO_INTERACTION=1",
@@ -456,7 +466,60 @@ extension = openssl.so`))
 			Expect(composerRemoveExecution.Dir).To(Equal(filepath.Join(workingDir)))
 			Expect(len(composerRemoveExecution.Env)).To(Equal(len(os.Environ()) + 6))
 
-			Expect(composerRequireExecution.Args).To(Equal([]string{"require", "--no-progress", "drush/drush"}))
+			Expect(composerRequireExecution.Args).To(Equal([]string{"require", "--no-progress", "--no-update", "drush/drush"}))
+			Expect(composerUpdateExecution.Args).To(Equal([]string{"update", "--no-progress", "--no-dev", "--with-dependencies", "drush/drush"}))
+		})
+	})
+
+	context("with BP_COMPOSER_INSTALL_REQUIRE when composer.lock changes unrelated packages", func() {
+		it.Before(func() {
+			Expect(os.WriteFile(filepath.Join(workingDir, "composer.json"), []byte("{}"), 0644)).To(Succeed())
+			Expect(os.WriteFile(filepath.Join(workingDir, "composer.lock"), []byte(`{
+	"packages": [
+		{"name": "drush/drush", "version": "13.0.0"},
+		{"name": "guzzlehttp/guzzle", "version": "7.0.0"}
+	],
+	"packages-dev": []
+}`), 0644)).To(Succeed())
+			Expect(os.Setenv(composer.BpComposerInstallRequire, "drush/drush")).To(Succeed())
+
+			composerInstallExecutable.ExecuteCall.Stub = func(temp pexec.Execution) error {
+				switch temp.Args[0] {
+				case "require":
+					composerRequireExecution = temp
+				case "update":
+					composerUpdateExecution = temp
+					Expect(os.WriteFile(filepath.Join(workingDir, "composer.lock"), []byte(`{
+	"packages": [
+		{"name": "drush/drush", "version": "13.0.1"},
+		{"name": "guzzlehttp/guzzle", "version": "7.1.0"}
+	],
+	"packages-dev": []
+}`), 0644)).To(Succeed())
+				case "install":
+					composerInstallExecution = temp
+				default:
+					return errors.New(fmt.Sprintf("unexpected composer command: %s", temp.Args[0]))
+				}
+
+				return nil
+			}
+		})
+
+		it.After(func() {
+			Expect(os.Unsetenv(composer.BpComposerInstallRequire)).To(Succeed())
+		})
+
+		it("returns an error", func() {
+			result, err := build(packit.BuildContext{
+				BuildpackInfo: buildpackInfo,
+				WorkingDir:    workingDir,
+				Layers:        packit.Layers{Path: layersDir},
+				Plan:          buildpackPlan,
+			})
+
+			Expect(result).To(Equal(packit.BuildResult{}))
+			Expect(err).To(MatchError("BP_COMPOSER_INSTALL_REQUIRE updated unexpected packages in composer.lock: guzzlehttp/guzzle"))
 		})
 	})
 
