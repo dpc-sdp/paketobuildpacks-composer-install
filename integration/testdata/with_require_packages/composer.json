@@ -1,0 +1,7 @@
+{
+    "name": "paketo/composer_app",
+    "require": {
+        "php": "8.*"
+    }
+}
+

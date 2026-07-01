@@ -177,4 +177,54 @@ func testDefaultApp(t *testing.T, context spec.G, it spec.S) {
 			})
 		})
 	})
+
+	context("with_require_packages", func() {
+		var (
+			image     occam.Image
+			container occam.Container
+
+			name   string
+			source string
+		)
+
+		it.Before(func() {
+			var err error
+			name, err = occam.RandomName()
+			Expect(err).NotTo(HaveOccurred())
+			source, err = occam.Source(filepath.Join("testdata", "with_require_packages"))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		it.After(func() {
+			Expect(docker.Container.Remove.Execute(container.ID)).To(Succeed())
+			Expect(docker.Image.Remove.Execute(image.ID)).To(Succeed())
+			Expect(docker.Volume.Remove.Execute(occam.CacheVolumeNames(name))).To(Succeed())
+			Expect(os.RemoveAll(source)).To(Succeed())
+		})
+
+		it("installs additional packages into the application layer", func() {
+			var err error
+			var logs fmt.Stringer
+
+			image, logs, err = pack.Build.
+				WithPullPolicy("never").
+				WithBuildpacks(buildpacksArray...).
+				WithEnv(map[string]string{
+					"BP_COMPOSER_INSTALL_REQUIRE": "vlucas/phpdotenv",
+					"BP_PHP_SERVER":               "nginx",
+				}).
+				Execute(name, source)
+			Expect(err).ToNot(HaveOccurred(), logs.String)
+
+			Expect(logs).To(ContainSubstring("Running 'composer require --no-progress vlucas/phpdotenv'"))
+
+			container, err = docker.Container.Run.
+				WithEnv(map[string]string{"PORT": "8765"}).
+				WithPublish("8765").
+				Execute(image.ID)
+			Expect(err).NotTo(HaveOccurred())
+
+			Eventually(container).Should(Serve(ContainSubstring("Powered By Paketo Buildpacks")).OnPort(8765))
+		})
+	})
 }

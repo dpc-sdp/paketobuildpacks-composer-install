@@ -20,12 +20,14 @@ import (
 )
 
 // DetermineComposerInstallOptions defines the interface to get options for `composer install`
+//
 //go:generate faux --interface DetermineComposerInstallOptions --output fakes/determine_composer_install_options.go
 type DetermineComposerInstallOptions interface {
 	Determine() []string
 }
 
 // Executable just provides a fake for pexec.Executable for testing
+//
 //go:generate faux --interface Executable --output fakes/executable.go
 type Executable interface {
 	Execute(pexec.Execution) (err error)
@@ -38,6 +40,7 @@ type SBOMGenerator interface {
 
 // Calculator defines the interface for calculating a checksum of the given set
 // of file paths.
+//
 //go:generate faux --interface Calculator --output fakes/calculator.go
 type Calculator interface {
 	Sum(paths ...string) (string, error)
@@ -203,6 +206,58 @@ func runComposerGlobalIfRequired(
 	return
 }
 
+func normalizeComposerPackageList(value string) string {
+	packages := strings.Fields(value)
+	if len(packages) == 0 {
+		return ""
+	}
+
+	return strings.Join(packages, " ")
+}
+
+// runComposerRequireIfRequired will check for existence of env var "BP_COMPOSER_INSTALL_REQUIRE".
+// If that exists, it will run `composer require` with the contents of BP_COMPOSER_INSTALL_REQUIRE
+// so those packages are installed into the application layer.
+func runComposerRequireIfRequired(
+	logger scribe.Emitter,
+	context packit.BuildContext,
+	composerInstallExec Executable,
+	path string,
+	composerPhpIniPath string,
+	composerHomePath string,
+	composerJsonPath string,
+	workspaceVendorDir string) error {
+	composerInstallRequire, found := os.LookupEnv(BpComposerInstallRequire)
+	if !found {
+		return nil
+	}
+
+	packages := strings.Fields(composerInstallRequire)
+	if len(packages) == 0 {
+		return nil
+	}
+
+	args := append([]string{"require", "--no-progress"}, packages...)
+	logger.Process("Running 'composer %s'", strings.Join(args, " "))
+
+	execution := pexec.Execution{
+		Args: args,
+		Dir:  context.WorkingDir,
+		Env: append(os.Environ(),
+			"COMPOSER_NO_INTERACTION=1", // https://getcomposer.org/doc/03-cli.md#composer-no-interaction
+			fmt.Sprintf("COMPOSER=%s", composerJsonPath),
+			fmt.Sprintf("COMPOSER_HOME=%s", composerHomePath),
+			fmt.Sprintf("COMPOSER_VENDOR_DIR=%s", workspaceVendorDir),
+			fmt.Sprintf("PHPRC=%s", composerPhpIniPath),
+			fmt.Sprintf("PATH=%s", path),
+		),
+		Stdout: logger.ActionWriter,
+		Stderr: logger.ActionWriter,
+	}
+
+	return composerInstallExec.Execute(execution)
+}
+
 // runComposerInstall will run `composer install` to download dependencie into
 // the app directory, and will be copied into a layer and cached for reuse.
 //
@@ -228,6 +283,7 @@ func runComposerInstall(
 	}
 
 	composerJsonPath, composerLockPath, _, _ := FindComposerFiles(context.WorkingDir)
+	composerInstallRequire := normalizeComposerPackageList(os.Getenv(BpComposerInstallRequire))
 
 	layerVendorDir := filepath.Join(composerPackagesLayer.Path, "vendor")
 
@@ -245,7 +301,8 @@ func runComposerInstall(
 	}
 
 	cachedSHA, shaOk := composerPackagesLayer.Metadata["composer-lock-sha"].(string)
-	if (shaOk && cachedSHA == composerLockChecksum) && (stackOk && stack.(string) == context.Stack) {
+	cachedRequire, requireOk := composerPackagesLayer.Metadata["composer-require-packages"].(string)
+	if (shaOk && cachedSHA == composerLockChecksum) && (stackOk && stack.(string) == context.Stack) && (requireOk && cachedRequire == composerInstallRequire) {
 		logger.Process("Reusing cached layer %s", composerPackagesLayer.Path)
 		logger.Break()
 
@@ -302,8 +359,13 @@ func runComposerInstall(
 		composerPackagesLayer.Cache)
 
 	composerPackagesLayer.Metadata = map[string]interface{}{
-		"stack":             context.Stack,
-		"composer-lock-sha": composerLockChecksum,
+		"stack":                     context.Stack,
+		"composer-lock-sha":         composerLockChecksum,
+		"composer-require-packages": composerInstallRequire,
+	}
+
+	if err := runComposerRequireIfRequired(logger, context, composerInstallExec, path, composerPhpIniPath, filepath.Join(composerPackagesLayer.Path, ".composer"), composerJsonPath, workspaceVendorDir); err != nil {
+		return packit.Layer{}, err
 	}
 
 	args := []string{"config", "autoloader-suffix", ComposerAutoloaderSuffix}

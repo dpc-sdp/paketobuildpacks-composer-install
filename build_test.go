@@ -24,18 +24,19 @@ func testBuild(t *testing.T, context spec.G, it spec.S) {
 	var (
 		Expect = NewWithT(t).Expect
 
-		buffer                                  *bytes.Buffer
-		installOptions                          *fakes.DetermineComposerInstallOptions
-		composerConfigExecutable                *fakes.Executable
-		composerInstallExecutable               *fakes.Executable
-		composerGlobalExecutable                *fakes.Executable
+		buffer                                           *bytes.Buffer
+		installOptions                                   *fakes.DetermineComposerInstallOptions
+		composerConfigExecutable                         *fakes.Executable
+		composerInstallExecutable                        *fakes.Executable
+		composerGlobalExecutable                         *fakes.Executable
 		composerCheckAndEnablePlatformReqsExecExecutable *fakes.Executable
-		composerConfigExecution                 pexec.Execution
-		composerInstallExecution                pexec.Execution
-		composerGlobalExecution                 pexec.Execution
+		composerConfigExecution                          pexec.Execution
+		composerInstallExecution                         pexec.Execution
+		composerRequireExecution                         pexec.Execution
+		composerGlobalExecution                          pexec.Execution
 		composerCheckAndEnablePlatformReqsExecExecution  pexec.Execution
-		sbomGenerator                           *fakes.SBOMGenerator
-		calculator                              *fakes.Calculator
+		sbomGenerator                                    *fakes.SBOMGenerator
+		calculator                                       *fakes.Calculator
 
 		layersDir  string
 		workingDir string
@@ -69,10 +70,20 @@ func testBuild(t *testing.T, context spec.G, it spec.S) {
 		}
 
 		composerInstallExecutable.ExecuteCall.Stub = func(temp pexec.Execution) error {
-			Expect(os.MkdirAll(filepath.Join(workingDir, "vendor", "local-package-name"), os.ModeDir|os.ModePerm)).To(Succeed())
-			Expect(fmt.Fprint(temp.Stdout, "stdout from composer install\n")).To(Equal(29))
-			Expect(fmt.Fprint(temp.Stderr, "stderr from composer install\n")).To(Equal(29))
-			composerInstallExecution = temp
+			switch temp.Args[0] {
+			case "require":
+				Expect(os.MkdirAll(filepath.Join(workingDir, "vendor", "pass-through-package"), os.ModeDir|os.ModePerm)).To(Succeed())
+				Expect(fmt.Fprint(temp.Stdout, "stdout from composer require\n")).To(Equal(29))
+				Expect(fmt.Fprint(temp.Stderr, "stderr from composer require\n")).To(Equal(29))
+				composerRequireExecution = temp
+			case "install":
+				Expect(os.MkdirAll(filepath.Join(workingDir, "vendor", "local-package-name"), os.ModeDir|os.ModePerm)).To(Succeed())
+				Expect(fmt.Fprint(temp.Stdout, "stdout from composer install\n")).To(Equal(29))
+				Expect(fmt.Fprint(temp.Stderr, "stderr from composer install\n")).To(Equal(29))
+				composerInstallExecution = temp
+			default:
+				return errors.New(fmt.Sprintf("unexpected composer command: %s", temp.Args[0]))
+			}
 			return nil
 		}
 
@@ -147,6 +158,7 @@ php       8.1.4    success
 		Expect(os.RemoveAll(workingDir)).To(Succeed())
 		Expect(os.Unsetenv("COMPOSER")).To(Succeed())
 		Expect(os.Unsetenv("PHP_EXTENSION_DIR")).To(Succeed())
+		Expect(os.Unsetenv(composer.BpComposerInstallRequire)).To(Succeed())
 	})
 
 	context("without COMPOSER set", func() {
@@ -175,6 +187,7 @@ php       8.1.4    success
 			Expect(packagesLayer.LaunchEnv).To(BeEmpty())
 			Expect(packagesLayer.ProcessLaunchEnv).To(BeEmpty())
 			Expect(packagesLayer.Metadata["composer-lock-sha"]).To(Equal("default-checksum"))
+			Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal(""))
 			Expect(packagesLayer.Metadata["stack"]).To(Equal(""))
 
 			Expect(packagesLayer.SBOM.Formats()).To(HaveLen(2))
@@ -363,6 +376,52 @@ extension = openssl.so`))
 		})
 	})
 
+	context("with BP_COMPOSER_INSTALL_REQUIRE", func() {
+		it.Before(func() {
+			Expect(os.Setenv(composer.BpComposerInstallRequire, "vlucas/phpdotenv")).To(Succeed())
+		})
+
+		it.After(func() {
+			Expect(os.Unsetenv(composer.BpComposerInstallRequire)).To(Succeed())
+		})
+
+		it("runs 'composer require' and copies packages into the final layer", func() {
+			result, err := build(packit.BuildContext{
+				BuildpackInfo: buildpackInfo,
+				WorkingDir:    workingDir,
+				Layers:        packit.Layers{Path: layersDir},
+				Plan:          buildpackPlan,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(composerRequireExecution.Args).To(Equal([]string{"require", "--no-progress", "vlucas/phpdotenv"}))
+			Expect(composerRequireExecution.Dir).To(Equal(filepath.Join(workingDir)))
+			Expect(composerRequireExecution.Stdout).ToNot(BeNil())
+			Expect(composerRequireExecution.Stderr).ToNot(BeNil())
+			Expect(len(composerRequireExecution.Env)).To(Equal(len(os.Environ()) + 6))
+
+			Expect(composerRequireExecution.Env).To(ContainElements(
+				"COMPOSER_NO_INTERACTION=1",
+				fmt.Sprintf("COMPOSER=%s", filepath.Join(workingDir, "composer.json")),
+				fmt.Sprintf("COMPOSER_HOME=%s", filepath.Join(layersDir, "composer-packages", ".composer")),
+				fmt.Sprintf("COMPOSER_VENDOR_DIR=%s/vendor", workingDir),
+				fmt.Sprintf("PHPRC=%s", filepath.Join(layersDir, "composer-php-ini", "composer-php.ini")),
+				"PATH=fake-path-from-tests"))
+
+			Expect(composerInstallExecution.Args).To(Equal([]string{"install", "options", "from", "fake"}))
+			Expect(composerInstallExecution.Dir).To(Equal(filepath.Join(workingDir)))
+			Expect(filepath.Join(layersDir, composer.ComposerPackagesLayerName, "vendor", "local-package-name")).To(BeADirectory())
+
+			Expect(filepath.Join(workingDir, "vendor", "pass-through-package")).To(BeADirectory())
+
+			layers := result.Layers
+			Expect(layers).To(HaveLen(1))
+			packagesLayer := layers[0]
+			Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal("vlucas/phpdotenv"))
+			Expect(filepath.Join(layersDir, composer.ComposerPackagesLayerName, "vendor", "pass-through-package")).To(BeADirectory())
+		})
+	})
+
 	context("when the checksum for composer.lock matches a previous layer's checksum", func() {
 		it.Before(func() {
 			buildpackPlan.Entries[0].Metadata["launch"] = true
@@ -373,6 +432,7 @@ extension = openssl.so`))
 				[]byte(`[metadata]
 stack = ""
 composer-lock-sha = "sha-from-composer-lock"
+composer-require-packages = ""
 `), os.ModePerm)
 			Expect(err).NotTo(HaveOccurred())
 
@@ -408,6 +468,7 @@ composer-lock-sha = "sha-from-composer-lock"
 			Expect(packagesLayer.Cache).To(BeTrue())
 
 			Expect(packagesLayer.Metadata["composer-lock-sha"]).To(Equal("sha-from-composer-lock"))
+			Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal(""))
 			Expect(packagesLayer.Metadata["stack"]).To(Equal(""))
 
 			Expect(packagesLayer.SBOM.Formats()).To(HaveLen(2))
@@ -488,6 +549,7 @@ composer-lock-sha = "sha-from-composer-lock"
 				Expect(packagesLayer.Cache).To(BeTrue())
 
 				Expect(packagesLayer.Metadata["composer-lock-sha"]).To(Equal("sha-from-composer-lock"))
+				Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal(""))
 				Expect(packagesLayer.Metadata["stack"]).To(Equal("another-stack"))
 			})
 		})
@@ -521,6 +583,7 @@ composer-lock-sha = "sha-from-composer-lock"
 				Expect(packagesLayer.Cache).To(BeTrue())
 
 				Expect(packagesLayer.Metadata["composer-lock-sha"]).To(Equal("sha-from-composer-lock"))
+				Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal(""))
 				Expect(packagesLayer.Metadata["stack"]).To(Equal(""))
 
 				Expect(filepath.Join(workingDir, "vendor", "file.txt")).To(BeAnExistingFile())

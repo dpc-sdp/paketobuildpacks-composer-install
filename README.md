@@ -126,6 +126,15 @@ These packages will not be available to the application.
 BP_COMPOSER_INSTALL_GLOBAL="friendsofphp/php-cs-fixer squizlabs/php_codesniffer=*"
 ```
 
+### `BP_COMPOSER_INSTALL_REQUIRE`
+
+Use `BP_COMPOSER_INSTALL_REQUIRE` to specify additional Composer packages that should be installed into the application's Composer layer.
+These packages are installed with `composer require` before `composer install`, so they are available to the application at runtime.
+
+```shell
+BP_COMPOSER_INSTALL_REQUIRE="vlucas/phpdotenv"
+```
+
 ### Other environment variables
 
 Other environment variables used by Composer may be passed in to configure Composer behavior. 

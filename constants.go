@@ -31,6 +31,10 @@ const (
 	// This is typically so that they will be available during `composer` scripts
 	BpComposerInstallGlobal = "BP_COMPOSER_INSTALL_GLOBAL"
 
+	// BpComposerInstallRequire is a space-delimited list of packages to be installed via `composer require`
+	// This is typically so that they will be available in the application layer
+	BpComposerInstallRequire = "BP_COMPOSER_INSTALL_REQUIRE"
+
 	// BpComposerInstallOptions is a list of options to be provided to `composer install`
 	// These will be parsed using the shellwords library https://github.com/mattn/go-shellwords
 	BpComposerInstallOptions = "BP_COMPOSER_INSTALL_OPTIONS"
