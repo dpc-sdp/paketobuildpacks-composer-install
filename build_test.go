@@ -33,6 +33,7 @@ func testBuild(t *testing.T, context spec.G, it spec.S) {
 		composerConfigExecution                          pexec.Execution
 		composerInstallExecution                         pexec.Execution
 		composerRequireExecution                         pexec.Execution
+		composerRemoveExecution                          pexec.Execution
 		composerGlobalExecution                          pexec.Execution
 		composerCheckAndEnablePlatformReqsExecExecution  pexec.Execution
 		sbomGenerator                                    *fakes.SBOMGenerator
@@ -71,6 +72,10 @@ func testBuild(t *testing.T, context spec.G, it spec.S) {
 
 		composerInstallExecutable.ExecuteCall.Stub = func(temp pexec.Execution) error {
 			switch temp.Args[0] {
+			case "remove":
+				Expect(fmt.Fprint(temp.Stdout, "stdout from composer remove\n")).To(Equal(28))
+				Expect(fmt.Fprint(temp.Stderr, "stderr from composer remove\n")).To(Equal(28))
+				composerRemoveExecution = temp
 			case "require":
 				Expect(os.MkdirAll(filepath.Join(workingDir, "vendor", "pass-through-package"), os.ModeDir|os.ModePerm)).To(Succeed())
 				Expect(fmt.Fprint(temp.Stdout, "stdout from composer require\n")).To(Equal(29))
@@ -378,6 +383,7 @@ extension = openssl.so`))
 
 	context("with BP_COMPOSER_INSTALL_REQUIRE", func() {
 		it.Before(func() {
+			Expect(os.WriteFile(filepath.Join(workingDir, "composer.json"), []byte("{}"), 0644)).To(Succeed())
 			Expect(os.Setenv(composer.BpComposerInstallRequire, "vlucas/phpdotenv")).To(Succeed())
 		})
 
@@ -419,6 +425,38 @@ extension = openssl.so`))
 			packagesLayer := layers[0]
 			Expect(packagesLayer.Metadata["composer-require-packages"]).To(Equal("vlucas/phpdotenv"))
 			Expect(filepath.Join(layersDir, composer.ComposerPackagesLayerName, "vendor", "pass-through-package")).To(BeADirectory())
+		})
+	})
+
+	context("with BP_COMPOSER_INSTALL_REQUIRE and existing require-dev package", func() {
+		it.Before(func() {
+			Expect(os.WriteFile(filepath.Join(workingDir, "composer.json"), []byte(`{
+	"name": "composer-app",
+	"require-dev": {
+		"drush/drush": "^13"
+	}
+}`), 0644)).To(Succeed())
+			Expect(os.Setenv(composer.BpComposerInstallRequire, "drush/drush")).To(Succeed())
+		})
+
+		it.After(func() {
+			Expect(os.Unsetenv(composer.BpComposerInstallRequire)).To(Succeed())
+		})
+
+		it("removes package from require-dev before requiring it for runtime install", func() {
+			_, err := build(packit.BuildContext{
+				BuildpackInfo: buildpackInfo,
+				WorkingDir:    workingDir,
+				Layers:        packit.Layers{Path: layersDir},
+				Plan:          buildpackPlan,
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(composerRemoveExecution.Args).To(Equal([]string{"remove", "--dev", "--no-update", "--no-progress", "drush/drush"}))
+			Expect(composerRemoveExecution.Dir).To(Equal(filepath.Join(workingDir)))
+			Expect(len(composerRemoveExecution.Env)).To(Equal(len(os.Environ()) + 6))
+
+			Expect(composerRequireExecution.Args).To(Equal([]string{"require", "--no-progress", "drush/drush"}))
 		})
 	})
 

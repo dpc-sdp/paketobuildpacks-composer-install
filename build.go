@@ -2,6 +2,7 @@ package composer
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -237,6 +238,31 @@ func runComposerRequireIfRequired(
 		return nil
 	}
 
+	if removeDevArgs, err := determineComposerRemoveDevArgs(composerJsonPath, packages); err != nil {
+		return err
+	} else if len(removeDevArgs) > 0 {
+		logger.Process("Running 'composer %s'", strings.Join(removeDevArgs, " "))
+
+		execution := pexec.Execution{
+			Args: removeDevArgs,
+			Dir:  context.WorkingDir,
+			Env: append(os.Environ(),
+				"COMPOSER_NO_INTERACTION=1", // https://getcomposer.org/doc/03-cli.md#composer-no-interaction
+				fmt.Sprintf("COMPOSER=%s", composerJsonPath),
+				fmt.Sprintf("COMPOSER_HOME=%s", composerHomePath),
+				fmt.Sprintf("COMPOSER_VENDOR_DIR=%s", workspaceVendorDir),
+				fmt.Sprintf("PHPRC=%s", composerPhpIniPath),
+				fmt.Sprintf("PATH=%s", path),
+			),
+			Stdout: logger.ActionWriter,
+			Stderr: logger.ActionWriter,
+		}
+
+		if err := composerInstallExec.Execute(execution); err != nil {
+			return err
+		}
+	}
+
 	args := append([]string{"require", "--no-progress"}, packages...)
 	logger.Process("Running 'composer %s'", strings.Join(args, " "))
 
@@ -256,6 +282,41 @@ func runComposerRequireIfRequired(
 	}
 
 	return composerInstallExec.Execute(execution)
+}
+
+func determineComposerRemoveDevArgs(composerJsonPath string, packageSpecs []string) ([]string, error) {
+	file, err := os.Open(composerJsonPath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var composerJSON struct {
+		RequireDev map[string]string `json:"require-dev"`
+	}
+
+	if err := json.NewDecoder(file).Decode(&composerJSON); err != nil {
+		return nil, err
+	}
+
+	if len(composerJSON.RequireDev) == 0 {
+		return nil, nil
+	}
+
+	var removePackages []string
+	for _, packageSpec := range packageSpecs {
+		parts := strings.SplitN(packageSpec, ":", 2)
+		packageName := parts[0]
+		if _, found := composerJSON.RequireDev[packageName]; found {
+			removePackages = append(removePackages, packageName)
+		}
+	}
+
+	if len(removePackages) == 0 {
+		return nil, nil
+	}
+
+	return append([]string{"remove", "--dev", "--no-update", "--no-progress"}, removePackages...), nil
 }
 
 // runComposerInstall will run `composer install` to download dependencie into
